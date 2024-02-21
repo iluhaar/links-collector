@@ -12,7 +12,7 @@ addEventListener("fetch", (event) => {
   event.respondWith(handleRequest(event.request));
 });
 
-addEventListener("scheduled", () => {
+addEventListener("scheduled", (event) => {
   event.waitUntil(scheduled());
 });
 
