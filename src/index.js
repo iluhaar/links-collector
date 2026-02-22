@@ -35,8 +35,7 @@ async function notifyUsers() {
       const linkName = link[0];
       const linkUrl = link[1];
 
-      const url = `https://api.telegram.org/bot${API_KEY}/sendMessage?chat_id=${chatId}&text=Name: ${linkName}, Url:${linkUrl}`;
-      await fetch(url); // No need to parse response
+      await sendLinkMessage(chatId, linkName, linkUrl);
     }
   }
 }
@@ -46,9 +45,34 @@ async function mapAllLinks(links, chatId) {
     const linkName = link[0];
     const linkUrl = link[1];
 
-    const url = `https://api.telegram.org/bot${API_KEY}/sendMessage?chat_id=${chatId}&text=Name: ${linkName}, Url:${linkUrl}`;
-    await fetch(url); // No need to parse response
+    await sendLinkMessage(chatId, linkName, linkUrl);
   }
+}
+
+function buildInlineKeyboard(linkName) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "keep", callback_data: "keep" },
+        { text: "delete", callback_data: `delete:${linkName}` },
+      ],
+    ],
+  };
+}
+
+async function sendLinkMessage(chatId, linkName, linkUrl) {
+  const url = `https://api.telegram.org/bot${API_KEY}/sendMessage`;
+  const body = {
+    chat_id: chatId,
+    text: `Name: ${linkName}, Url:${linkUrl}`,
+    reply_markup: buildInlineKeyboard(linkName),
+  };
+
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 async function getAllLinks(chatId) {
@@ -112,6 +136,40 @@ async function deleteLink(key, chatId) {
   await fetch(url); // No need to parse response
 }
 
+async function deleteLinkByName(linkKey, chatId) {
+  const requesterLinks = await LINKS.get(chatId);
+
+  if (requesterLinks === null) {
+    return false;
+  }
+
+  const parsedLinks = JSON.parse(requesterLinks);
+
+  if (!Object.prototype.hasOwnProperty.call(parsedLinks, linkKey)) {
+    return false;
+  }
+
+  delete parsedLinks[linkKey];
+  await LINKS.put(chatId, JSON.stringify(parsedLinks));
+
+  return true;
+}
+
+async function answerCallbackQuery(callbackQueryId, text) {
+  const url = `https://api.telegram.org/bot${API_KEY}/answerCallbackQuery`;
+  const body = {
+    callback_query_id: callbackQueryId,
+    text,
+    show_alert: false,
+  };
+
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 async function handleWelcomeMessage(userName, chatId) {
   const message = `Hello ${userName}, ${startMessage}`;
 
@@ -123,7 +181,33 @@ async function handleRequest(request) {
   if (request.method === "POST") {
     try {
       // Extract the JSON payload from the request body
-      const { message } = await request.json();
+      const update = await request.json();
+      const { message, callback_query: callbackQuery } = update;
+
+      if (callbackQuery) {
+        const callbackData = callbackQuery.data || "";
+        const callbackQueryId = callbackQuery.id;
+        const chatId = callbackQuery.message?.chat?.id;
+
+        if (callbackData === "keep") {
+          await answerCallbackQuery(callbackQueryId, "Kept");
+          return new Response("OK");
+        }
+
+        if (callbackData.startsWith("delete:")) {
+          const linkKey = callbackData.slice("delete:".length);
+          const deleted = await deleteLinkByName(linkKey, chatId);
+
+          if (deleted) {
+            const url = `https://api.telegram.org/bot${API_KEY}/sendMessage?chat_id=${chatId}&text= The link ${linkKey} was deleted`;
+            await fetch(url); // No need to parse response
+          }
+
+          await answerCallbackQuery(callbackQueryId, deleted ? "Deleted" : "Not found");
+          return new Response("OK");
+        }
+      }
+
       const isCommand = /^\//.test(message?.text);
       const chatId = message?.chat?.id;
       const userName = message?.chat?.first_name;
