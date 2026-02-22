@@ -29,26 +29,98 @@ async function notifyUsers() {
 
     const parsedSavedLink = JSON.parse(requestedLink);
 
-    const arr = Object.entries(parsedSavedLink);
+    const now = Date.now();
+    const normalizedLinks = normalizeLinks(parsedSavedLink, now);
+    const filteredLinks = removeExpiredLinks(normalizedLinks, now);
+
+    await LINKS.put(chatId, JSON.stringify(filteredLinks));
+
+    const arr = Object.entries(filteredLinks);
 
     for (const link of arr) {
       const linkName = link[0];
-      const linkUrl = link[1];
+      const linkUrl = link[1].url;
 
-      const url = `https://api.telegram.org/bot${API_KEY}/sendMessage?chat_id=${chatId}&text=Name: ${linkName}, Url:${linkUrl}`;
-      await fetch(url); // No need to parse response
+      await sendLinkMessage(chatId, linkName, linkUrl);
     }
   }
 }
 
 async function mapAllLinks(links, chatId) {
+  const now = Date.now();
+  const normalizedLinks = normalizeLinks(links, now);
+
+  await LINKS.put(chatId, JSON.stringify(normalizedLinks));
+
   for (const link of Object.entries(links)) {
     const linkName = link[0];
-    const linkUrl = link[1];
+    const linkUrl = link[1].url;
 
-    const url = `https://api.telegram.org/bot${API_KEY}/sendMessage?chat_id=${chatId}&text=Name: ${linkName}, Url:${linkUrl}`;
-    await fetch(url); // No need to parse response
+    await sendLinkMessage(chatId, linkName, linkUrl);
   }
+}
+
+function normalizeLinks(links, now) {
+  const normalized = {};
+
+  for (const [linkName, value] of Object.entries(links)) {
+    if (typeof value === "string") {
+      normalized[linkName] = {
+        url: value,
+        createdAt: now,
+        lastKeptAt: null,
+      };
+    } else {
+      normalized[linkName] = {
+        url: value.url,
+        createdAt: value.createdAt ?? now,
+        lastKeptAt: value.lastKeptAt ?? null,
+      };
+    }
+  }
+
+  return normalized;
+}
+
+function removeExpiredLinks(links, now) {
+  const twoWeeksMs = 14 * 24 * 60 * 60 * 1000;
+  const filtered = {};
+
+  for (const [linkName, value] of Object.entries(links)) {
+    const anchor = value.lastKeptAt ?? value.createdAt;
+
+    if (now - anchor < twoWeeksMs) {
+      filtered[linkName] = value;
+    }
+  }
+
+  return filtered;
+}
+
+function buildInlineKeyboard(linkName) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "keep", callback_data: `keep:${linkName}` },
+        { text: "delete", callback_data: `delete:${linkName}` },
+      ],
+    ],
+  };
+}
+
+async function sendLinkMessage(chatId, linkName, linkUrl) {
+  const url = `https://api.telegram.org/bot${API_KEY}/sendMessage`;
+  const body = {
+    chat_id: chatId,
+    text: `Name: ${linkName}, Url:${linkUrl}`,
+    reply_markup: buildInlineKeyboard(linkName),
+  };
+
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 async function getAllLinks(chatId) {
@@ -65,18 +137,27 @@ async function addNewLink(link, chatId) {
   const id = chatId;
   const savedLinks = await LINKS.get(id);
   const userUrl = link.trim().split(" ")[2];
+  const now = Date.now();
 
   if (savedLinks !== null) {
-    const parsedSavedLinks = JSON.parse(savedLinks);
+    const parsedSavedLinks = normalizeLinks(JSON.parse(savedLinks), now);
 
-    parsedSavedLinks[key] = userUrl;
+    parsedSavedLinks[key] = {
+      url: userUrl,
+      createdAt: now,
+      lastKeptAt: null,
+    };
     // Store the payload in a KV namespace
     await LINKS.put(id, JSON.stringify(parsedSavedLinks));
     const url = `https://api.telegram.org/bot${API_KEY}/sendMessage?chat_id=${chatId}&text=${answer}`;
     await fetch(url); // No need to parse response
   } else {
     const data = {
-      [key]: userUrl,
+      [key]: {
+        url: userUrl,
+        createdAt: now,
+        lastKeptAt: null,
+      },
     };
 
     // Store the payload in a KV namespace
@@ -90,9 +171,12 @@ async function addNewLink(link, chatId) {
 async function getLink(message, chatId) {
   const linkKey = message.trim().split(" ")[1];
   const requesterLinks = await LINKS.get(chatId);
-  const parsedLinks = JSON.parse(requesterLinks);
+  const now = Date.now();
+  const parsedLinks = normalizeLinks(JSON.parse(requesterLinks), now);
 
-  const link = parsedLinks[linkKey];
+  const link = parsedLinks[linkKey]?.url;
+
+  await LINKS.put(chatId, JSON.stringify(parsedLinks));
 
   const url = `https://api.telegram.org/bot${API_KEY}/sendMessage?chat_id=${chatId}&text=Name: ${linkKey}, Url:${link}`;
   await fetch(url); // No need to parse response
@@ -102,7 +186,8 @@ async function deleteLink(key, chatId) {
   const linkKey = key.trim().split(" ")[1];
 
   const requesterLinks = await LINKS.get(chatId);
-  const parsedLinks = JSON.parse(requesterLinks);
+  const now = Date.now();
+  const parsedLinks = normalizeLinks(JSON.parse(requesterLinks), now);
 
   delete parsedLinks[linkKey];
 
@@ -110,6 +195,61 @@ async function deleteLink(key, chatId) {
 
   const url = `https://api.telegram.org/bot${API_KEY}/sendMessage?chat_id=${chatId}&text= The link ${linkKey} was deleted`;
   await fetch(url); // No need to parse response
+}
+
+async function deleteLinkByName(linkKey, chatId) {
+  const requesterLinks = await LINKS.get(chatId);
+
+  if (requesterLinks === null) {
+    return false;
+  }
+
+  const now = Date.now();
+  const parsedLinks = normalizeLinks(JSON.parse(requesterLinks), now);
+
+  if (!Object.prototype.hasOwnProperty.call(parsedLinks, linkKey)) {
+    return false;
+  }
+
+  delete parsedLinks[linkKey];
+  await LINKS.put(chatId, JSON.stringify(parsedLinks));
+
+  return true;
+}
+
+async function keepLinkByName(linkKey, chatId) {
+  const requesterLinks = await LINKS.get(chatId);
+
+  if (requesterLinks === null) {
+    return false;
+  }
+
+  const now = Date.now();
+  const parsedLinks = normalizeLinks(JSON.parse(requesterLinks), now);
+
+  if (!Object.prototype.hasOwnProperty.call(parsedLinks, linkKey)) {
+    return false;
+  }
+
+  parsedLinks[linkKey].lastKeptAt = now;
+  await LINKS.put(chatId, JSON.stringify(parsedLinks));
+
+  return true;
+}
+
+async function answerCallbackQuery(callbackQueryId, text) {
+  const url = `https://api.telegram.org/bot${API_KEY}/answerCallbackQuery`;
+  const body = {
+    callback_query_id: callbackQueryId,
+    text,
+    show_alert: false,
+  };
+
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 async function handleWelcomeMessage(userName, chatId) {
@@ -123,7 +263,36 @@ async function handleRequest(request) {
   if (request.method === "POST") {
     try {
       // Extract the JSON payload from the request body
-      const { message } = await request.json();
+      const update = await request.json();
+      const { message, callback_query: callbackQuery } = update;
+
+      if (callbackQuery) {
+        const callbackData = callbackQuery.data || "";
+        const callbackQueryId = callbackQuery.id;
+        const chatId = callbackQuery.message?.chat?.id;
+
+        if (callbackData.startsWith("keep:")) {
+          const linkKey = callbackData.slice("keep:".length);
+          const kept = await keepLinkByName(linkKey, chatId);
+
+          await answerCallbackQuery(callbackQueryId, kept ? "Kept" : "Not found");
+          return new Response("OK");
+        }
+
+        if (callbackData.startsWith("delete:")) {
+          const linkKey = callbackData.slice("delete:".length);
+          const deleted = await deleteLinkByName(linkKey, chatId);
+
+          if (deleted) {
+            const url = `https://api.telegram.org/bot${API_KEY}/sendMessage?chat_id=${chatId}&text= The link ${linkKey} was deleted`;
+            await fetch(url); // No need to parse response
+          }
+
+          await answerCallbackQuery(callbackQueryId, deleted ? "Deleted" : "Not found");
+          return new Response("OK");
+        }
+      }
+
       const isCommand = /^\//.test(message?.text);
       const chatId = message?.chat?.id;
       const userName = message?.chat?.first_name;
